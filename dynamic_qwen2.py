@@ -18,6 +18,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """ PyTorch Qwen2 model."""
+import os
 import inspect
 import math
 import warnings
@@ -44,19 +45,31 @@ from transformers.utils import (
 )
 from configuration_qwen2 import Qwen2Config
 
+WEIGHTS_NAME = "pytorch_model.bin"
 
-if is_flash_attn_2_available():
+try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
 
-    _flash_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
-
+    _flash_supports_window_size = "window_size" in list(
+        inspect.signature(flash_attn_func).parameters
+    )
+except:
+    pad_input, unpad_input = None, None
+    FlashRotaryEmbedding = None
+    FlashSelfAttention, FlashCrossAttention = None, None
+    FusedDense = None
 
 logger = logging.get_logger(__name__)
 
 
 _CHECKPOINT_FOR_DOC = "Qwen/Qwen2-7B-beta"
 _CONFIG_FOR_DOC = "Qwen2Config"
+
+QWEN2_PRETRAINED_MODEL_ARCHIVE_LIST = [
+    "Qwen/Qwen2-7B-beta",
+    # See all Qwen2 models at https://huggingface.co/models?filter=qwen2
+]
 
 
 # Copied from transformers.models.llama.modeling_llama._get_unpad_data
@@ -910,22 +923,30 @@ QWEN2_INPUTS_DOCSTRING = r"""
     QWEN2_START_DOCSTRING,
 )
 class Qwen2Model(Qwen2PreTrainedModel):
-    """
-    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`Qwen2DecoderLayer`]
-
-    Args:
-        config: Qwen2Config
-    """
-
     def __init__(self, config: Qwen2Config):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList(
-            [Qwen2DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
-        )
+        
+        layers = []
+        layer_id = 0
+        for start, end in config.layer_ranges:
+            for i in range(start, end):
+                if layer_id < len(layers):
+                    if layers[layer_id] is None:
+                        layers[layer_id] = Qwen2DecoderLayer(config, layer_idx=layer_id)
+                else:
+                    layers.append(Qwen2DecoderLayer(config, layer_idx=layer_id))
+                layer_id += 1
+        
+        while layer_id < config.num_hidden_layers:
+            layers.append(None)
+            layer_id += 1
+        
+        self.layers = nn.ModuleList(layers)
+        
         self._attn_implementation = config._attn_implementation
         self.norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -933,11 +954,78 @@ class Qwen2Model(Qwen2PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def get_input_embeddings(self):
-        return self.embed_tokens
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path: Optional[Union[str, os.PathLike]], *model_args, **kwargs):
+        config = kwargs.pop("config", None)
+        state_dict = kwargs.pop("state_dict", None)
+        cache_dir = kwargs.pop("cache_dir", None)
+        from_tf = kwargs.pop("from_tf", False)
+        force_download = kwargs.pop("force_download", False)
+        resume_download = kwargs.pop("resume_download", False)
+        proxies = kwargs.pop("proxies", None)
+        output_loading_info = kwargs.pop("output_loading_info", False)
+        local_files_only = kwargs.pop("local_files_only", False)
+        use_auth_token = kwargs.pop("use_auth_token", None)
+        revision = kwargs.pop("revision", None)
+        mirror = kwargs.pop("mirror", None)
+        from_pipeline = kwargs.pop("_from_pipeline", None)
+        from_auto_class = kwargs.pop("_from_auto", False)
+        _fast_init = kwargs.pop("_fast_init", True)
+        torch_dtype = kwargs.pop("torch_dtype", None)
+        low_cpu_mem_usage = kwargs.pop("low_cpu_mem_usage", False)
+        trust_remote_code = kwargs.pop("trust_remote_code", None)
 
-    def set_input_embeddings(self, value):
-        self.embed_tokens = value
+        if trust_remote_code is None:
+            trust_remote_code = False
+
+        model = super().from_pretrained(
+            pretrained_model_name_or_path,
+            *model_args,
+            config=config,
+            cache_dir=cache_dir,
+            from_tf=from_tf,
+            force_download=force_download,
+            resume_download=resume_download,
+            proxies=proxies,
+            output_loading_info=output_loading_info,
+            local_files_only=local_files_only,
+            use_auth_token=use_auth_token,
+            revision=revision,
+            mirror=mirror,
+            from_pipeline=from_pipeline,
+            from_auto_class=from_auto_class,
+            _fast_init=_fast_init,
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=low_cpu_mem_usage,
+            _from_auto=from_auto_class,
+            trust_remote_code=trust_remote_code,
+            **kwargs,
+        )
+
+        if state_dict is None:
+            weights_file = os.path.join(pretrained_model_name_or_path, WEIGHTS_NAME)
+            if os.path.exists(weights_file):
+                state_dict = torch.load(weights_file, map_location="cpu")
+            else:
+                try:
+                    from safetensors import safe_open
+                    with safe_open(os.path.join(pretrained_model_name_or_path, "model.safetensors"), framework="pt") as f:
+                        state_dict = f.get_state_dict()
+                except ImportError:
+                    raise ValueError(
+                        "Could not find the `safetensors` library. Please install it via `pip install safetensors`."
+                    )
+                except Exception as e:
+                    raise ValueError(f"Error loading safetensors file: {e}")
+        
+        # Initialize layers according to state_dict
+        for layer_id, layer in enumerate(model.layers):
+            if layer is not None:
+                layer_key = f"layers.{layer_id}."
+                layer_state_dict = {k[len(layer_key):]: v for k, v in state_dict.items() if k.startswith(layer_key)}
+                layer.load_state_dict(layer_state_dict)
+
+        return model
 
     @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
     def forward(
@@ -1035,13 +1123,16 @@ class Qwen2Model(Qwen2PreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
-        for decoder_layer in self.layers:
+        for layer in self.layers:
+            if layer is None:
+                continue
+            
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
-                    decoder_layer.__call__,
+                    layer.__call__,
                     hidden_states,
                     attention_mask,
                     position_ids,
@@ -1050,7 +1141,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
                     use_cache,
                 )
             else:
-                layer_outputs = decoder_layer(
+                layer_outputs = layer(
                     hidden_states,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
@@ -1062,7 +1153,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
             hidden_states = layer_outputs[0]
 
             if use_cache:
-                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+                next_decoder_cache.append(layer_outputs[2 if output_attentions else 1])
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)

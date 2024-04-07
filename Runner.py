@@ -4,7 +4,7 @@ import argparse
 import torch
 import yaml
 from transformers import AutoTokenizer
-from dynamic_qwen2 import Qwen2Model, Qwen2Config  # 从 modified_qwen2.py 导入修改后的类
+from dynamic_qwen2 import Qwen2ForCausalLM, Qwen2Config  # 从 modified_qwen2.py 导入修改后的类
 
 def load_config(config_path):
     with open(config_path, "r") as f:
@@ -40,8 +40,8 @@ def main(args):
         trust_remote_code=True,
     )
 
-    # Load the modified Qwen2Model
-    model = Qwen2Model.from_pretrained(
+    # Load the modified Qwen2ForCausalLM
+    model = Qwen2ForCausalLM.from_pretrained(
         args.model_path,
         config=model_config,
         torch_dtype=torch.float16,
