@@ -1,79 +1,56 @@
-import os
-print(os.getcwd())
-import argparse
 import torch
-import yaml
 from transformers import AutoTokenizer
-from dynamic_qwen2 import Qwen2ForCausalLM, Qwen2Config  # 从 modified_qwen2.py 导入修改后的类
+from modeling import Qwen2ForCausalLM
+from configuration_qwen2 import Qwen2Config
 
-def load_config(config_path):
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-    return config
+# 设置设备
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
-def get_layer_ranges(config):
-    layer_ranges = []
-    for slice_cfg in config["slices"]:
-        for source in slice_cfg["sources"]:
-            layer_range = tuple(source["layer_range"])
-            layer_ranges.append(layer_range)
-    return layer_ranges
+# 指定本地模型路径
+model_path = "D:/Qwen1.8B"
 
-def main(args):
-    instruction = '''
-        def print_prime(n):
-            """
-            Print all primes between 1 and n
-            """
-    '''
+# 加载并修改配置
+config = Qwen2Config.from_pretrained(model_path)
+config.num_virtual_layers = 4  # 设置虚拟层数量
 
-    torch.set_default_device("cuda")
+# 使用修改后的配置加载模型
+model = Qwen2ForCausalLM.from_pretrained(
+    model_path,
+    config=config,
+    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+    device_map="auto"
+)
+tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-    # Load the configuration
-    config = load_config(args.config_path)
-    layer_ranges = get_layer_ranges(config)
+# 设置提示
+prompt = "Give me a short introduction to large language model."
+messages = [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": prompt}
+]
+text = tokenizer.apply_chat_template(
+    messages,
+    tokenize=False,
+    add_generation_prompt=True
+)
 
-    # Load the model configuration with layer_ranges
-    model_config = Qwen2Config.from_pretrained(
-        args.model_path,
-        layer_ranges=layer_ranges,
-        trust_remote_code=True,
-    )
+# 准备输入
+model_inputs = tokenizer([text], return_tensors="pt").to(device)
 
-    # Load the modified Qwen2ForCausalLM
-    model = Qwen2ForCausalLM.from_pretrained(
-        args.model_path,
-        config=model_config,
-        torch_dtype=torch.float16,
-        trust_remote_code=True,
-    )
+# 生成回答
+generated_ids = model.generate(
+    model_inputs.input_ids,
+    max_new_tokens=512
+)
+generated_ids = [
+    output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
+]
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model_path,
-        trust_remote_code=True,
-    )
+# 解码输出
+response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
-    # Tokenize the input string
-    inputs = tokenizer(
-        instruction,
-        return_tensors="pt",
-        return_attention_mask=False,
-    )
+# 打印结果
+print("Response:", response)
 
-    # Generate text using the model
-    outputs = model.generate(
-        **inputs,
-        max_length=200,
-    )
-
-    # Decode and print the output
-    text = tokenizer.batch_decode(outputs)[0]
-    print(text)
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run dynamic merging with Qwen2 model")
-    parser.add_argument("--model_path", type=str, required=True, help="Path to the pretrained Qwen2 model")
-    parser.add_argument("--config_path", type=str, required=True, help="Path to the layer range configuration file")
-    args = parser.parse_args()
-
-    main(args)
+# 为了在PowerShell中暂停执行，等待用户输入
+input("Press Enter to exit...")

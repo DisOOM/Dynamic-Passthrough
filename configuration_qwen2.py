@@ -12,16 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Qwen2 model configuration"""
+"""Qwen2 model configuration"""
 
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 
 
+
 logger = logging.get_logger(__name__)
-
-
-from _archive_maps import QWEN2_PRETRAINED_CONFIG_ARCHIVE_MAP  # noqa: F401, E402
 
 
 class Qwen2Config(PretrainedConfig):
@@ -50,7 +48,7 @@ class Qwen2Config(PretrainedConfig):
         num_key_value_heads (`int`, *optional*, defaults to 32):
             This is the number of key_value heads that should be used to implement Grouped Query Attention. If
             `num_key_value_heads=num_attention_heads`, the model will use Multi Head Attention (MHA), if
-            `num_key_value_heads=1 the model will use Multi Query Attention (MQA) otherwise GQA is used. When
+            `num_key_value_heads=1` the model will use Multi Query Attention (MQA) otherwise GQA is used. When
             converting a multi-head checkpoint to a GQA checkpoint, each group key and value head should be constructed
             by meanpooling all the original heads within that group. For more details checkout [this
             paper](https://arxiv.org/pdf/2305.13245.pdf). If it is not specified, will default to `32`.
@@ -113,7 +111,7 @@ class Qwen2Config(PretrainedConfig):
         sliding_window=4096,
         max_window_layers=28,
         attention_dropout=0.0,
-        layer_ranges=None,  # 层范围
+        num_virtual_layers=1,  # 新增：虚拟层数量
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -123,8 +121,9 @@ class Qwen2Config(PretrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         self.use_sliding_window = use_sliding_window
-        self.sliding_window = sliding_window
+        self.sliding_window = sliding_window if use_sliding_window else None
         self.max_window_layers = max_window_layers
+        self.num_virtual_layers = num_virtual_layers  # 新增：设置虚拟层数量
 
         # for backward compatibility
         if num_key_value_heads is None:
@@ -137,7 +136,6 @@ class Qwen2Config(PretrainedConfig):
         self.use_cache = use_cache
         self.rope_theta = rope_theta
         self.attention_dropout = attention_dropout
-        self.layer_ranges = layer_ranges if layer_ranges is not None else [(0, num_hidden_layers)]  # 设置默认值
 
         super().__init__(
             tie_word_embeddings=tie_word_embeddings,
